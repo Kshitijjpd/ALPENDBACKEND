@@ -2,7 +2,10 @@ import axios from "axios";
 import dotenv from "dotenv";
 
 dotenv.config();
-
+const QPACKAGE_ID2 =
+  "e472995c281988ccc7b46953e699c0c33b42252c0a9b42dc3b55b451efaa8239";
+const PACKAGE =
+  "528c134e69a7d9163ebc02ef66f831954f7048fd94f9bd01322faadd81123c2e";
 // Config from env
 const {
   LEDGER_URL,
@@ -12,8 +15,6 @@ const {
   AUDIENCE,
   VALIDATOR_PARTY,
   DSO_PARTY,
-  PACKAGE,
-  QPACKAGE_ID2,
 } = process.env;
 
 // Template IDs
@@ -158,8 +159,128 @@ export async function addStaker(poolContractId, newStaker) {
   };
 }
 
-// Deposit tokens to pool
+// Get pool by contract ID
+export async function getPoolById(poolContractId) {
+  const offset = await getLedgerEndOffset();
+
+  const result = await ledgerRequest("state/active-contracts", {
+    filter: {
+      filtersByParty: {
+        [VALIDATOR_PARTY]: {
+          cumulative: [
+            {
+              identifierFilter: {
+                TemplateFilter: {
+                  value: {
+                    templateId: STAKING_POOL,
+                    includeCreatedEventBlob: false,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+    verbose: true,
+    activeAtOffset: offset,
+  });
+
+  const pool = result
+    .filter((r) => r.contractEntry?.JsActiveContract)
+    .map((r) => ({
+      contractId: r.contractEntry.JsActiveContract.createdEvent.contractId,
+      ...r.contractEntry.JsActiveContract.createdEvent.createArgument,
+    }))
+    .find((p) => p.contractId === poolContractId);
+
+  return pool || null;
+}
+
+// Get holding by contract ID
+export async function getHoldingById(holdingCid, owner) {
+  const offset = await getLedgerEndOffset();
+
+  const result = await ledgerRequest("state/active-contracts", {
+    filter: {
+      filtersByParty: {
+        [owner]: {
+          cumulative: [
+            {
+              identifierFilter: {
+                TemplateFilter: {
+                  value: {
+                    templateId: CIP56_HOLDING,
+                    includeCreatedEventBlob: false,
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    },
+    verbose: true,
+    activeAtOffset: offset,
+  });
+
+  const holding = result
+    .filter((r) => r.contractEntry?.JsActiveContract)
+    .map((r) => {
+      const event = r.contractEntry.JsActiveContract.createdEvent;
+      return {
+        contractId: event.contractId,
+        issuer: event.createArgument.issuer,
+        owner: event.createArgument.owner,
+        amount: event.createArgument.amount,
+      };
+    })
+    .find((h) => h.contractId === holdingCid);
+
+  return holding || null;
+}
+
+// Deposit tokens to pool (with validation)
 export async function deposit(poolContractId, staker, holdingCid, amount) {
+  // Validate pool exists and get its issuer
+  const pool = await getPoolById(poolContractId);
+  if (!pool) {
+    throw new Error(`Pool not found: ${poolContractId}`);
+  }
+
+  // Validate staker is in pool's stakers list
+  if (!pool.stakers.includes(staker)) {
+    throw new Error(
+      `Staker not authorized. Use /pool/add-staker first. Pool stakers: [${pool.stakers.join(
+        ", "
+      )}]`
+    );
+  }
+
+  // Validate holding exists and get its issuer
+  const holding = await getHoldingById(holdingCid, staker);
+  if (!holding) {
+    throw new Error(`Holding not found: ${holdingCid}`);
+  }
+
+  // Validate issuer match
+  if (pool.issuer !== holding.issuer) {
+    throw new Error(
+      `Issuer mismatch! Pool issuer: ${pool.issuer}, Holding issuer: ${holding.issuer}. ` +
+        `Create a pool with issuer: ${holding.issuer}`
+    );
+  }
+
+  // Validate amount
+  const depositAmount = parseFloat(amount);
+  const holdingAmount = parseFloat(holding.amount);
+  if (depositAmount > holdingAmount) {
+    throw new Error(
+      `Insufficient balance. Requested: ${depositAmount}, Available: ${holdingAmount}`
+    );
+  }
+
+  // All validations passed, execute deposit
   const result = await ledgerRequest(
     "commands/submit-and-wait-for-transaction",
     {
@@ -266,17 +387,19 @@ export async function queryPools() {
   return {
     success: true,
     pools,
+    count: pools.length,
   };
 }
 
 // Query stakes for a staker
 export async function queryStakes(staker) {
+  const stakerParty = staker || VALIDATOR_PARTY;
   const offset = await getLedgerEndOffset();
 
   const result = await ledgerRequest("state/active-contracts", {
     filter: {
       filtersByParty: {
-        [staker]: {
+        [stakerParty]: {
           cumulative: [
             {
               identifierFilter: {
@@ -306,20 +429,23 @@ export async function queryStakes(staker) {
   return {
     success: true,
     stakes,
+    count: stakes.length,
+    totalStaked: stakes.reduce((sum, s) => sum + parseFloat(s.amount || 0), 0),
   };
 }
 
 // Query holdings for an owner
 export async function queryHoldings(owner) {
+  const ownerParty = owner || VALIDATOR_PARTY;
   const offset = await getLedgerEndOffset();
 
-  console.log("Querying holdings for:", owner);
+  console.log("Querying holdings for:", ownerParty);
   console.log("Using template:", CIP56_HOLDING);
 
   const result = await ledgerRequest("state/active-contracts", {
     filter: {
       filtersByParty: {
-        [owner]: {
+        [ownerParty]: {
           cumulative: [
             {
               identifierFilter: {
@@ -350,16 +476,20 @@ export async function queryHoldings(owner) {
         issuer: event.createArgument.issuer,
         owner: event.createArgument.owner,
         amount: event.createArgument.amount,
+        meta: event.createArgument.meta,
         isCantonCoin: event.createArgument.issuer === CANTON_COIN_ISSUER,
       };
     });
 
   return {
     success: true,
-    queryParty: owner,
+    queryParty: ownerParty,
     holdings: holdings,
     count: holdings.length,
-    totalAmount: holdings.reduce((sum, h) => sum + parseFloat(h.amount || 0), 0),
+    totalAmount: holdings.reduce(
+      (sum, h) => sum + parseFloat(h.amount || 0),
+      0
+    ),
   };
 }
 
@@ -368,6 +498,8 @@ export default {
   getLedgerEndOffset,
   createPool,
   addStaker,
+  getPoolById,
+  getHoldingById,
   deposit,
   withdraw,
   queryPools,

@@ -1,25 +1,24 @@
-import express from 'express';
-import * as stakingController from '../controllers/stakingController.js';
+import express from "express";
+import * as stakingController from "../controllers/stakingController.js";
 
 const router = express.Router();
 
-// Config
-router.get('/config', stakingController.getConfig);
+// Config & Health
+router.get("/config", stakingController.getConfig);
+router.get("/ledger-end", stakingController.getLedgerEnd);
 
-// Ledger
-router.get('/ledger-end', stakingController.getLedgerEnd);
+// Pool operations (Admin)
+router.post("/pool/create", stakingController.createPool); // Create new pool with issuer
+router.post("/pool/add-staker", stakingController.addStaker); // Add staker to pool
+router.get("/pool/:poolContractId", stakingController.getPool); // Get pool details
+router.get("/pools", stakingController.getPools); // List all pools
 
-// Pool operations
-router.post('/pool/create', stakingController.createPool);
-router.post('/pool/add-staker', stakingController.addStaker);
-router.post('/pool/deposit', stakingController.deposit);
-router.get('/pools', stakingController.getPools);
-
-// Stake operations
-router.post('/stake/withdraw', stakingController.withdraw);
-router.get('/stakes/:staker', stakingController.getStakes);
+// Staking operations (User)
+router.post("/pool/deposit", stakingController.deposit); // Deposit/lock tokens
+router.post("/stake/withdraw", stakingController.withdraw); // Withdraw/unlock tokens
+router.get("/stakes", stakingController.getStakes); // Query stakes (?staker=party)
 
 // Holdings
-router.get('/holdings', stakingController.getHoldings);
+router.get("/holdings", stakingController.getHoldings); // Query holdings (?owner=party)
 
 export default router;
